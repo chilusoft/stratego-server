@@ -1,0 +1,28 @@
+{
+  "name": "stratego-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Game server for Reversi/Chess/Checkers with matchmaking, discovery, and leaderboards",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "fastify": "^5.2.0",
+    "@fastify/websocket": "^11.0.2",
+    "jsonwebtoken": "^9.0.2",
+    "google-auth-library": "^9.15.0"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}
