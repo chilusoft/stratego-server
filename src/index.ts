@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import websocket from '@fastify/websocket';
 import { RoomManager } from './rooms/manager.js';
 import { MatchmakingQueue } from './matchmaking/queue.js';
+import { LeaderboardStore } from './leaderboard/store.js';
 
 async function main() {
   const app = Fastify({ logger: true });
@@ -10,6 +11,21 @@ async function main() {
   const matchmaking = new MatchmakingQueue();
   const playerSockets = new Map<string, (obj: unknown) => void>();
   const playerRooms = new Map<string, string>();
+  const leaderboard = new LeaderboardStore();
+  const recorded = new Set<string>();
+
+  const trackRoom = (room: ReturnType<RoomManager['create']>, game: string) => {
+    room.addListener((snap) => {
+      if (snap.status !== 'finished' || recorded.has(room.id)) return;
+      recorded.add(room.id);
+      const [a, b] = snap.players;
+      const winnerColor = snap.winner;
+      const winnerId = winnerColor === 'draw' || winnerColor === null
+        ? null
+        : snap.players.find((p) => p.color === winnerColor)?.id ?? null;
+      if (a && b) leaderboard.recordMatch(game, { playerId: a.id, name: a.name }, { playerId: b.id, name: b.name }, winnerId, snap.reason ?? 'completed');
+    });
+  };
 
   matchmaking.onMatch = ({ mode, a, b }) => {
     if (mode !== 'reversi') {
@@ -18,6 +34,7 @@ async function main() {
       return;
     }
     const room = rooms.create();
+    trackRoom(room, mode);
     room.addPlayer(a.playerId, a.name);
     room.addPlayer(b.playerId, b.name);
     for (const p of [a, b]) {
@@ -32,7 +49,11 @@ async function main() {
   };
 
   app.get('/health', async () => ({ status: 'ok' }));
-  app.get('/leaderboard', async () => ({ games: ['reversi', 'chess', 'checkers'], entries: [] }));
+  app.get('/leaderboard', async (req: any) => {
+    const game = req.query?.game ?? 'reversi';
+    return { game, entries: leaderboard.top(game) };
+  });
+  app.get('/history/:playerId', async (req: any) => ({ history: leaderboard.historyFor(req.params.playerId) }));
   app.get('/rooms', async () => ({ open: rooms.openRooms() }));
 
   app.register(async (f) => {
@@ -59,6 +80,7 @@ async function main() {
           switch (msg.type) {
             case 'create_room': {
               const room = rooms.create(msg.timeMs);
+              trackRoom(room, 'reversi');
               room.addPlayer(playerId, msg.name ?? 'player');
               playerRooms.set(playerId, room.id);
               send({ type: 'room_created', roomId: room.id, playerId });
