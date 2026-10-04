@@ -3,6 +3,8 @@ import websocket from '@fastify/websocket';
 import { RoomManager } from './rooms/manager.js';
 import { MatchmakingQueue } from './matchmaking/queue.js';
 import { LeaderboardStore } from './leaderboard/store.js';
+import { NameRegistry } from './rooms/name-registry.js';
+import { GoogleVerifier, DEFAULT_GOOGLE_CLIENT_IDS } from './auth/google.js';
 
 async function main() {
   const app = Fastify({ logger: true });
@@ -12,6 +14,12 @@ async function main() {
   const playerSockets = new Map<string, (obj: unknown) => void>();
   const playerRooms = new Map<string, string>();
   const leaderboard = new LeaderboardStore();
+  const names = new NameRegistry();
+  const nameOfPlayer = new Map<string, string>();
+  const authedPlayer = new Map<string, { name: string; email?: string; lat?: number; lon?: number }>();
+  const googleVerifier = new GoogleVerifier(
+    (process.env.GOOGLE_CLIENT_IDS ?? DEFAULT_GOOGLE_CLIENT_IDS.join(',')).split(',').map((s) => s.trim()),
+  );
   const recorded = new Set<string>();
 
   const trackRoom = (room: ReturnType<RoomManager['create']>, game: string) => {
@@ -20,10 +28,10 @@ async function main() {
       recorded.add(room.id);
       const [a, b] = snap.players;
       const winnerColor = snap.winner;
-      const winnerId = winnerColor === 'draw' || winnerColor === null
+      const winner = winnerColor === 'draw' || winnerColor === null
         ? null
-        : snap.players.find((p) => p.color === winnerColor)?.id ?? null;
-      if (a && b) leaderboard.recordMatch(game, { playerId: a.id, name: a.name }, { playerId: b.id, name: b.name }, winnerId, snap.reason ?? 'completed');
+        : snap.players.find((p) => p.color === winnerColor);
+      if (a && b) leaderboard.recordMatch(game, a.name, b.name, winner?.name ?? null, snap.reason ?? 'completed');
     });
   };
 
@@ -53,7 +61,7 @@ async function main() {
     const game = req.query?.game ?? 'reversi';
     return { game, entries: leaderboard.top(game) };
   });
-  app.get('/history/:playerId', async (req: any) => ({ history: leaderboard.historyFor(req.params.playerId) }));
+  app.get('/history/:name', async (req: any) => ({ history: leaderboard.historyFor(req.params.name) }));
   app.get('/rooms', async () => ({ open: rooms.openRooms() }));
 
   app.register(async (f) => {
@@ -64,6 +72,10 @@ async function main() {
       socket.on('close', () => {
         playerSockets.delete(playerId);
         matchmaking.leave(playerId);
+        const n = nameOfPlayer.get(playerId);
+        if (n) names.release(n, playerId);
+        nameOfPlayer.delete(playerId);
+        authedPlayer.delete(playerId);
       });
 
       const attach = (roomId: string) => {
@@ -77,11 +89,31 @@ async function main() {
         let msg: any;
         try { msg = JSON.parse(raw.toString()); } catch { return send({ type: 'error', error: 'bad json' }); }
         try {
+          if (msg.type === 'auth') {
+            if (typeof msg.token !== 'string') return send({ type: 'error', error: 'missing token' });
+            googleVerifier.verify(msg.token).then((profile) => {
+              const displayName = profile.name ?? profile.email ?? `player-${playerId.slice(-4)}`;
+              if (!names.claim(displayName, playerId)) {
+                return send({ type: 'error', error: 'account name already in use' });
+              }
+              const entry: { name: string; email?: string; lat?: number; lon?: number } = { name: displayName, email: profile.email };
+              if (typeof msg.lat === 'number' && typeof msg.lon === 'number') { entry.lat = msg.lat; entry.lon = msg.lon; }
+              authedPlayer.set(playerId, entry);
+              nameOfPlayer.set(playerId, names.displayName(displayName));
+              send({ type: 'authed', name: displayName });
+            }).catch(() => send({ type: 'error', error: 'invalid Google token' }));
+            return;
+          }
+
+          if (!authedPlayer.has(playerId)) {
+            return send({ type: 'error', error: 'auth required' });
+          }
+
           switch (msg.type) {
             case 'create_room': {
               const room = rooms.create(msg.timeMs);
               trackRoom(room, 'reversi');
-              room.addPlayer(playerId, msg.name ?? 'player');
+              room.addPlayer(playerId, authedPlayer.get(playerId)!.name);
               playerRooms.set(playerId, room.id);
               send({ type: 'room_created', roomId: room.id, playerId });
               attach(room.id);
@@ -90,13 +122,14 @@ async function main() {
             case 'join_room': {
               const room = rooms.get(msg.roomId);
               if (!room) return send({ type: 'error', error: 'room not found' });
-              room.addPlayer(playerId, msg.name ?? 'player');
+              room.addPlayer(playerId, authedPlayer.get(playerId)!.name);
               playerRooms.set(playerId, room.id);
+              send({ type: 'joined', roomId: room.id, playerId });
               attach(room.id);
               break;
             }
             case 'queue_join': {
-              matchmaking.join({ playerId, name: msg.name ?? 'player', mode: msg.mode ?? 'reversi', rating: msg.rating, joinedAt: Date.now() });
+              matchmaking.join({ playerId, name: authedPlayer.get(playerId)!.name, mode: msg.mode ?? 'reversi', rating: msg.rating, joinedAt: Date.now() });
               send({ type: 'queued', mode: msg.mode ?? 'reversi' });
               break;
             }
